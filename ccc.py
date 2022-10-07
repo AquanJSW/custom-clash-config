@@ -232,6 +232,7 @@ class ExternalIPLookup:
             r = requests.put(
                 url=self.clash.control_addr + '/proxies/GLOBAL',
                 data=json.dumps(payload),
+                timeout=5
             )
             return r.ok
         except:
@@ -374,6 +375,8 @@ class UpdateExternalIP:
         proc_results = pool.starmap(wrapper_proc, zip(divided_ports, divided_proxies))
         pool.close()
         pool.join()
+
+        logging.debug('multiprocessing end')
 
         if not self.__has_valid_ip(proc_results):
             raise Exception('No valid IP. The IP Lookup API may be broken.')
