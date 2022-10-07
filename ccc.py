@@ -12,6 +12,7 @@ __parser = argparse.ArgumentParser()
 __parser.add_argument('bin', help='clash bin path')
 __parser.add_argument('config', help='clash config file/url')
 __parser.add_argument('template', help='template clash config file path/url')
+__parser.add_argument('--workers', help='for multiprocessing', default=0, type=int)
 __parser.add_argument('--proxy', help='used to get config from url.', default=None)
 __parser.add_argument(
     '--out', help='output config file path', default='./config/output.yml'
@@ -354,16 +355,15 @@ class UpdateExternalIP:
             has |= result[1]
         return has
 
-    def __call__(
-        self, proxy_dicts, clash_bin_path, workers=None
-    ) -> Iterable[ProxyObject]:
+    def __call__(self, proxy_dicts, clash_bin_path, workers=0) -> Iterable[ProxyObject]:
         """Update external IP and filter out external-IP-duplicated proxies.
 
         # Return
         proxy name ordered `ProxyObject` list
         """
-        if workers == None:
-            workers = multiprocessing.cpu_count()
+        assert workers >= 0
+        if workers == 0:
+            workers = multiprocessing.cpu_count() + 1
         divided_proxies = self.divide_iterable(proxy_dicts, workers)
         ports = self.acquire_ports(2 * len(divided_proxies))
         divided_ports = self.divide_iterable(ports, len(divided_proxies))
@@ -439,9 +439,9 @@ class ProxyObjects:
     def proxy_names(self):
         return [po.name for po in self.proxy_objs]
 
-    def update_external_ip(self, clash_bin_path):
+    def update_external_ip(self, clash_bin_path, workers):
         start = time.time()
-        self.proxy_objs = UpdateExternalIP()(self.proxy_dicts, clash_bin_path)
+        self.proxy_objs = UpdateExternalIP()(self.proxy_dicts, clash_bin_path, workers)
         end = time.time()
         logging.info(
             'time cost of updating external-ip and fitering: {}'.format(
@@ -606,7 +606,7 @@ def main():
 
     config_origin = load_config(args.config, args.proxy)
     proxy_objs = ProxyObjects(config_origin['proxies'])
-    proxy_objs.update_external_ip(args.bin)
+    proxy_objs.update_external_ip(args.bin, args.workers)
     if args.mmdb:
         proxy_objs.update_geometry(args.mmdb)
         if not args.disable_rename:
