@@ -557,7 +557,7 @@ class Config:
         conf_path = conf_fd.close()
 
         proc = subprocess.Popen(
-            '{} -f {} -t'.format(clash_bin_path, conf_path),
+            '{} -f {} -t'.format(clash_bin_path, conf_path).split(' '),
             stdout=log_fd,
             stderr=log_fd,
         )
