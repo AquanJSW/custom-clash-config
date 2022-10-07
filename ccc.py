@@ -12,6 +12,7 @@ __parser = argparse.ArgumentParser()
 __parser.add_argument('bin', help='clash bin path')
 __parser.add_argument('config', help='clash config file/url')
 __parser.add_argument('template', help='template clash config file path/url')
+__parser.add_argument('--proxy', help='used to get config from url.', default=None)
 __parser.add_argument(
     '--out', help='output config file path', default='./config/output.yml'
 )
@@ -71,18 +72,20 @@ def load_config_from_file(path):
         return conf
 
 
-def load_config_from_url(url):
+def load_config_from_url(url, proxy=None):
     headers = {'charset': 'utf-8'}
-    r = requests.get(url=url, headers=headers)
+    if proxy is not None:
+        proxy = {'https': proxy}
+    r = requests.get(url=url, headers=headers, proxies=proxy)
     conf = yaml.safe_load(r.text)
     return conf
 
 
-def load_config(path_or_url):
+def load_config(path_or_url, proxy=None):
     logging.debug('loading config from {}'.format(path_or_url))
     if os.path.isfile(path_or_url):
         return load_config_from_file(path_or_url)
-    return load_config_from_url(path_or_url)
+    return load_config_from_url(path_or_url, proxy)
 
 
 def dump_config(conf, path):
@@ -160,7 +163,7 @@ mode: global
         self.conf_path = Clash.__make_temp_subconf(control_port, proxy_port, proxies)
         logging.debug('spawning clash instance')
         self.clash_proc = subprocess.Popen(
-            '{} -f {}'.format(clash_bin_path, self.conf_path),
+            '{} -f {}'.format(clash_bin_path, self.conf_path).split(' '),
             stdout=self.log_fd,
             stderr=self.log_fd,
         )
@@ -595,13 +598,13 @@ class Config:
 
 def main():
     # check args
-    config_template = load_config(args.template)
+    config_template = load_config(args.template, args.proxy)
     config_obj_template = Config(config_template)
     if not args.mmdb and config_obj_template.has_region_key():
         logging.critical('Please provide mmdb database.')
         exit(1)
 
-    config_origin = load_config(args.config)
+    config_origin = load_config(args.config, args.proxy)
     proxy_objs = ProxyObjects(config_origin['proxies'])
     proxy_objs.update_external_ip(args.bin)
     if args.mmdb:
