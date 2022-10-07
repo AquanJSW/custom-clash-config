@@ -47,7 +47,7 @@ args = __parser.parse_args()
 logging.basicConfig(
     filename=args.log_file,
     level=getattr(logging, args.log_level),
-    format='[%(asctime)s] [%(process)d.%(thread)d] [%(levelname)s] %(message)s',
+    format='[%(asctime)s] [%(process)d] [%(levelname)s] %(message)s',
     encoding='utf-8',
 )
 logging.getLogger('requests').setLevel(logging.WARNING)
@@ -120,9 +120,9 @@ class GeoLookup:
 
 
 import requests
-from requests.exceptions import ProxyError, SSLError
+from requests.exceptions import ProxyError, SSLError, Timeout
 
-acceptable_exceptions = (SSLError, ProxyError)
+acceptable_exceptions = (SSLError, ProxyError, Timeout)
 
 
 def get_external_ip(local_proxy=None):
@@ -131,7 +131,7 @@ def get_external_ip(local_proxy=None):
     - `ProxyError`
     """
     if local_proxy is None:
-        r = requests.get('https://api64.ipify.org')
+        r = requests.get('https://api64.ipify.org', timeout=5)
         return r.text
     r = requests.get('https://api64.ipify.org', proxies={'https': local_proxy})
     return r.text
@@ -252,7 +252,7 @@ class ExternalIPLookup:
             except acceptable_exceptions:
                 ext_ips.append(ExternalIPLookup.id_failed_to_get_ext_ip)
 
-            logging.debug('{} {}'.format(proxy['name'], ext_ips[-1]))
+            logging.info('{} {}'.format(proxy['name'], ext_ips[-1]))
         return ext_ips, has_valid_ip
 
     def __del__(self):
@@ -437,7 +437,7 @@ class ProxyObjects:
 
     @property
     def proxy_names(self):
-        return [po.name for po in self.proxy_objs]
+        return sorted([po.name for po in self.proxy_objs])
 
     def update_external_ip(self, clash_bin_path, workers):
         start = time.time()
@@ -554,7 +554,8 @@ class Config:
 
         conf_fd = tempfile.NamedTemporaryFile('w', encoding='utf-8', delete=False)
         yaml.safe_dump(self.config, conf_fd, allow_unicode=True)
-        conf_path = conf_fd.close()
+        conf_path = conf_fd.name
+        conf_fd.close()
 
         proc = subprocess.Popen(
             '{} -f {} -t'.format(clash_bin_path, conf_path).split(' '),
@@ -592,7 +593,10 @@ class Config:
                 + '\n'
                 + make_separate_line('END clash test log')
             )
-        os.remove(conf_path)
+        try:
+            os.remove(conf_path)
+        except:
+            pass
         return ret
 
 
