@@ -133,7 +133,7 @@ def get_external_ip(local_proxy=None):
     if local_proxy is None:
         r = requests.get('https://api64.ipify.org', timeout=5)
         return r.text
-    r = requests.get('https://api64.ipify.org', proxies={'https': local_proxy})
+    r = requests.get('https://api64.ipify.org', proxies={'https': local_proxy}, timeout=5)
     return r.text
 
 
