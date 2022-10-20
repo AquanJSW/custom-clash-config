@@ -8,46 +8,47 @@ from typing import Iterable, Union
 import requests
 import yaml
 
-__parser = argparse.ArgumentParser()
-__parser.add_argument('bin', help='clash bin path')
-__parser.add_argument('config', help='clash config file/url')
-__parser.add_argument('template', help='template clash config file path/url')
-__parser.add_argument('--workers', help='for multiprocessing', default=0, type=int)
-__parser.add_argument('--proxy', help='used to get config from url.', default=None)
-__parser.add_argument(
-    '--out', help='output config file path', default='./config/output.yml'
+parser = argparse.ArgumentParser()
+parser.add_argument('bin', help='clash bin path')
+parser.add_argument('config', help='clash config file/url')
+parser.add_argument('template', help='template clash config file path/url')
+parser.add_argument('--workers', help='for multiprocessing', default=0, type=int)
+parser.add_argument('--proxy', help='used to get config from url.', default=None)
+parser.add_argument(
+    '--out', help='output config file path', default='./config/config.yml'
 )
-__parser.add_argument(
+parser.add_argument('--out-ss', help='output ss config', default='./config/config.json')
+parser.add_argument(
     '--mmdb',
     help='mmdb database path.',
     default=None,
 )
-__parser.add_argument(
+parser.add_argument(
     '--disable-rename', help='Rename proxy names', action='store_true', default=False
 )
-__parser.add_argument(
+parser.add_argument(
     '--format-v4',
     help='format string to rename proxy (IPv4)',
     default='{region} - {number:02d}',
 )
-__parser.add_argument(
+parser.add_argument(
     '--format-v6',
     help='format string to rename proxy (IPv6)',
     default='[IPV6] {region} - {number:02d}',
 )
-__parser.add_argument(
+parser.add_argument(
     '--log-level',
     help='log level',
     choices=('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'),
     default='WARNING',
 )
-__parser.add_argument('--log-file', help='log file', default=None)
-args = __parser.parse_args()
+parser.add_argument('--log-file', help='log file', default=None)
+args = parser.parse_args()
 
 logging.basicConfig(
     filename=args.log_file,
     level=getattr(logging, args.log_level),
-    format='[%(asctime)s] [%(process)d] [%(levelname)s] %(message)s',
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
     encoding='utf-8',
 )
 logging.getLogger('requests').setLevel(logging.WARNING)
@@ -95,6 +96,15 @@ def dump_config(conf, path):
     logging.info('config is saved to {}'.format(path))
 
 
+def dump_config_json(conf, path):
+    import json
+
+    with open(path, 'w', encoding='utf-8') as fd:
+        json.dump(conf, fd, indent=2, ensure_ascii=False)
+
+    logging.info(f'ss config is saved to {path}')
+
+
 import geoip2.database
 import geoip2.errors
 import geoip2.models
@@ -133,7 +143,9 @@ def get_external_ip(local_proxy=None):
     if local_proxy is None:
         r = requests.get('https://api64.ipify.org', timeout=5)
         return r.text
-    r = requests.get('https://api64.ipify.org', proxies={'https': local_proxy}, timeout=5)
+    r = requests.get(
+        'https://api64.ipify.org', proxies={'https': local_proxy}, timeout=5
+    )
     return r.text
 
 
@@ -232,7 +244,7 @@ class ExternalIPLookup:
             r = requests.put(
                 url=self.clash.control_addr + '/proxies/GLOBAL',
                 data=json.dumps(payload),
-                timeout=5
+                timeout=5,
             )
             return r.ok
         except:
@@ -499,6 +511,23 @@ class Config:
     def __init__(self, config) -> None:
         self.config = config
 
+    @property
+    def config_ss_android(self):
+        r = []
+        for proxy in self.config['proxies']:
+            if proxy['type'] != "ss":
+                continue
+            r.append(
+                {
+                    'remarks': proxy['name'],
+                    'server': proxy['server'],
+                    'server_port': proxy['port'],
+                    'method': proxy['cipher'],
+                    'password': proxy['password'],
+                }
+            )
+        return r
+
     def has_region_key(self):
         for pg in self.config['proxy-groups']:
             if 'region' in pg.keys():
@@ -623,6 +652,9 @@ def main():
 
     if config_obj_template.validate(args.bin):
         dump_config(config_obj_template.config, args.out)
+
+    if args.out_ss:
+        dump_config_json(config_obj_template.config_ss_android, args.out_ss)
 
 
 if __name__ == '__main__':
