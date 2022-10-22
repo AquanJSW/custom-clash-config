@@ -262,7 +262,9 @@ class ExternalIPLookup:
                 ext_ip = get_external_ip(self.clash.local_proxy_addr)
                 ext_ips.append(ext_ip)
                 has_valid_ip = True
-            except acceptable_exceptions:
+            except acceptable_exceptions as e:
+                name = proxy['name']
+                logging.warning(f'local clash proxy[{name}] error: {e}')
                 ext_ips.append(ExternalIPLookup.id_failed_to_get_ext_ip)
 
             logging.info('{} {}'.format(proxy['name'], ext_ips[-1]))
