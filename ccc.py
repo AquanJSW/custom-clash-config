@@ -1,40 +1,66 @@
 #! /usr/bin/env python3
 import argparse
+import io
+import ipaddress
+import json
 import logging
+import multiprocessing
 import os
+import signal
+import socket
+import subprocess
+import tempfile
 import time
 from typing import Iterable, Union
 
+import geoip2.database
+import geoip2.errors
+import geoip2.models
 import requests
 import yaml
+from requests.exceptions import ProxyError, SSLError, Timeout
+
+default_format_v4 = '{region} - {number:02d}'
+default_format_v6 = '[IPv6] {region} - {number:02d}'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('bin', help='clash bin path')
 parser.add_argument('config', help='clash config file/url')
-parser.add_argument('template', help='template clash config file path/url')
+parser.add_argument('templates', help='template clash config files path/url', nargs='+')
 parser.add_argument('--workers', help='for multiprocessing', default=0, type=int)
-parser.add_argument('--proxy', help='used to get config from url.', default=None)
 parser.add_argument(
-    '--out', help='output config file path', default='./config/config.yml'
+    '--proxy', help='existing proxy used to download files', default=None
 )
-parser.add_argument('--out-ss', help='output ss config', default='./config/config.json')
+parser.add_argument('-o', '--out', help='output config file pathes', nargs='+')
+parser.add_argument(
+    '--out-ss',
+    help='output ss config pathes, same sequence as argument `template`, place \
+        the templates to the end of its sequence so that this argument\' length \
+            may differ from `template` if you want to disable outputing ss configs.',
+    nargs='*',
+    default=[],
+)
 parser.add_argument(
     '--mmdb',
-    help='mmdb database path.',
+    help='mmdb database path, not perform geolookup by default.',
     default=None,
 )
 parser.add_argument(
-    '--disable-rename', help='Rename proxy names', action='store_true', default=False
+    '--enable-rename',
+    help='Rename proxy names, see also argument `out-ss`',
+    nargs='*',
+    type=int,
+    default=[],
 )
 parser.add_argument(
     '--format-v4',
-    help='format string to rename proxy (IPv4)',
-    default='{region} - {number:02d}',
+    help=f'format string to rename proxy (IPv4)',
+    default=default_format_v4,
 )
 parser.add_argument(
     '--format-v6',
-    help='format string to rename proxy (IPv6)',
-    default='[IPV6] {region} - {number:02d}',
+    help=f'format string to rename proxy (IPv6)',
+    default=default_format_v6,
 )
 parser.add_argument(
     '--log-level',
@@ -45,10 +71,26 @@ parser.add_argument(
 parser.add_argument('--log-file', help='log file', default=None)
 args = parser.parse_args()
 
+
+def prepare_args():
+    length = len(args.templates)
+    assert len(args.out) == length
+    for arg, default in zip(
+        [args.out_ss, args.enable_rename],
+        [False, False],
+    ):
+        assert len(arg) <= length
+        arg.extend([default] * (length - len(arg)))
+
+
+prepare_args()
+
 logging.basicConfig(
     filename=args.log_file,
+    filemode='w',
     level=getattr(logging, args.log_level),
     format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%m-%d %H:%M:%S',
     encoding='utf-8',
 )
 logging.getLogger('requests').setLevel(logging.WARNING)
@@ -97,17 +139,11 @@ def dump_config(conf, path):
 
 
 def dump_config_json(conf, path):
-    import json
 
     with open(path, 'w', encoding='utf-8') as fd:
         json.dump(conf, fd, indent=2, ensure_ascii=False)
 
     logging.info(f'ss config is saved to {path}')
-
-
-import geoip2.database
-import geoip2.errors
-import geoip2.models
 
 
 class GeoLookup:
@@ -129,9 +165,6 @@ class GeoLookup:
             logging.warning('{} isn\'t in geometry database'.format(ip))
 
 
-import requests
-from requests.exceptions import ProxyError, SSLError, Timeout
-
 acceptable_exceptions = (SSLError, ProxyError, Timeout)
 
 
@@ -149,23 +182,10 @@ def get_external_ip(local_proxy=None):
     return r.text
 
 
-import io
-import json
-import multiprocessing
-import os
-import socket
-import subprocess
-import tempfile
-import time
-
-import requests
-import yaml
-
-
 class Clash:
     config_template = """
 external-controller: 'localhost:{control_port}'
-mixed-port: {proxy_port}
+port: {proxy_port}
 ipv6: true
 mode: global
 """
@@ -174,7 +194,7 @@ mode: global
         self.proxies = proxies
         self.log_fd = tempfile.SpooledTemporaryFile()
         self.conf_path = Clash.__make_temp_subconf(control_port, proxy_port, proxies)
-        logging.debug('spawning clash instance')
+        logging.debug(f'spawning clash instance, log file: {self.conf_path}')
         self.clash_proc = subprocess.Popen(
             '{} -f {}'.format(clash_bin_path, self.conf_path).split(' '),
             stdout=self.log_fd,
@@ -211,7 +231,7 @@ mode: global
         return fd.name
 
     def publish_clash_log(self):
-        self.log_fd.close()
+        # self.log_fd.close()
         self.log_fd.seek(0)
         log_str = ''.join([str(b, encoding='utf-8') for b in self.log_fd.readlines()])
         logging.critical(
@@ -231,7 +251,7 @@ mode: global
 clash_bin_path = None
 
 
-class ExternalIPLookup:
+class ProxyExternalIPLookup:
     id_failed_to_get_ext_ip = None
 
     def __init__(self, clash_bin_path, control_port, proxy_port, proxies):
@@ -257,7 +277,7 @@ class ExternalIPLookup:
             if not self.__switch_proxy(proxy):
                 logging.error('failed to switch proxy')
                 self.clash.publish_clash_log()
-                exit(0)
+                return None, has_valid_ip
             try:
                 ext_ip = get_external_ip(self.clash.local_proxy_addr)
                 ext_ips.append(ext_ip)
@@ -265,7 +285,7 @@ class ExternalIPLookup:
             except acceptable_exceptions as e:
                 name = proxy['name']
                 logging.warning(f'local clash proxy[{name}] error: {e}')
-                ext_ips.append(ExternalIPLookup.id_failed_to_get_ext_ip)
+                ext_ips.append(ProxyExternalIPLookup.id_failed_to_get_ext_ip)
 
             logging.info('{} {}'.format(proxy['name'], ext_ips[-1]))
         return ext_ips, has_valid_ip
@@ -274,10 +294,7 @@ class ExternalIPLookup:
         del self.clash
 
 
-import ipaddress
-
-
-class ProxyObject:
+class ProxyClass:
     def __init__(
         self,
         proxy_dict: dict = None,
@@ -293,7 +310,7 @@ class ProxyObject:
 
     @property
     def region(self):
-        return self.geo.country.names['zh-CN']
+        return self.geo.country.iso_code
 
     @property
     def name(self):
@@ -315,16 +332,22 @@ class ProxyObject:
         return '{} {}'.format(self.proxy_dict['name'], self.ext_ip)
 
 
-def wrapper_proc(ports, proxies):
-    return ExternalIPLookup(clash_bin_path, *ports, proxies)()
+def clash_pool_worker(ports, proxies):
+    return ProxyExternalIPLookup(clash_bin_path, *ports, proxies)()
 
 
-def initializer(clash_bin_path_):
+def clash_pool_init_worker(clash_bin_path_):
     global clash_bin_path
     clash_bin_path = clash_bin_path_
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-class UpdateExternalIP:
+class NoValidIPError(Exception):
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+
+
+class ProxyExternalIPLookupAndFilter:
     @staticmethod
     def is_port_in_use(port, addr='localhost', timeout=0.01):
         s = None
@@ -345,7 +368,7 @@ class UpdateExternalIP:
         ports = []
         port = start
         while count != 0 and port < 65536:
-            if not UpdateExternalIP.is_port_in_use(port):
+            if not ProxyExternalIPLookupAndFilter.is_port_in_use(port):
                 ports.append(port)
                 count -= 1
             port += 1
@@ -370,7 +393,7 @@ class UpdateExternalIP:
             has |= result[1]
         return has
 
-    def __call__(self, proxy_dicts, clash_bin_path, workers=0) -> Iterable[ProxyObject]:
+    def __call__(self, proxy_dicts, clash_bin_path, workers=0) -> Iterable[ProxyClass]:
         """Update external IP and filter out external-IP-duplicated proxies.
 
         # Return
@@ -385,15 +408,26 @@ class UpdateExternalIP:
 
         logging.debug('multiprocessing start')
 
-        pool = multiprocessing.Pool(len(divided_ports), initializer, (clash_bin_path,))
-        proc_results = pool.starmap(wrapper_proc, zip(divided_ports, divided_proxies))
-        pool.close()
-        pool.join()
+        try:
+            pool = multiprocessing.Pool(
+                len(divided_ports), clash_pool_init_worker, (clash_bin_path,)
+            )
+            proc_results = pool.starmap(
+                clash_pool_worker, zip(divided_ports, divided_proxies)
+            )
+            pool.close()
+            pool.join()
+        except KeyboardInterrupt:
+            pool.terminate()
+            pool.join()
+            exit(0)
 
         logging.debug('multiprocessing end')
 
         if not self.__has_valid_ip(proc_results):
-            raise Exception('No valid IP. The IP Lookup API may be broken.')
+            err_msg = 'no valid IPs, hns restarting is recommended.'
+            logging.error(err_msg)
+            raise NoValidIPError(err_msg)
 
         IPs = []
         for r in proc_results:
@@ -404,7 +438,7 @@ class UpdateExternalIP:
             proxies += p
 
         # filter out external-ip duplicated
-        proxy_objs = set([ProxyObject(proxy, ip) for proxy, ip in zip(proxies, IPs)])
+        proxy_objs = set([ProxyClass(proxy, ip) for proxy, ip in zip(proxies, IPs)])
         # filter out invalid proxy (external-ip == None)
         proxy_objs = list(filter(lambda p: p.ext_ip != None, proxy_objs))
         # sort
@@ -429,21 +463,21 @@ class UpdateExternalIP:
         return proxy_objs
 
 
-class ProxyObjects:
-    def __init__(self, init_arg: Union[Iterable[dict], Iterable[ProxyObject]]):
-        self.proxy_objs = self.__cvt_init_arg(init_arg)
-        self.map_region_PO_s = None
-        self.map_region_renamedPO_s = None
+class ProxiesClass:
+    def __init__(self, init_arg: Union[Iterable[dict], Iterable[ProxyClass]]):
+        self.proxy_objs = self.parse_proxies(init_arg)
+        self.map_region_proxyobjects = None
+        self.map_region_renamedproxyobjects = None
 
-    def __cvt_init_arg(self, init_arg):
-        if isinstance(init_arg[0], dict):
-            return [ProxyObject(pd) for pd in init_arg]
-        elif isinstance(init_arg[0], ProxyObject):
-            return init_arg
+    def parse_proxies(self, proxies):
+        if isinstance(proxies[0], dict):
+            return [ProxyClass(pd) for pd in proxies]
+        elif isinstance(proxies[0], ProxyClass):
+            return proxies
         else:
             logging.critical(
                 'Unknown init arg type ({}) for ProxyObjects.'.format(
-                    str(type(init_arg))
+                    str(type(proxies))
                 )
             )
             exit(1)
@@ -456,9 +490,11 @@ class ProxyObjects:
     def proxy_names(self):
         return sorted([po.name for po in self.proxy_objs])
 
-    def update_external_ip(self, clash_bin_path, workers):
+    def external_ip_lookup_and_filter(self, clash_bin_path, workers):
         start = time.time()
-        self.proxy_objs = UpdateExternalIP()(self.proxy_dicts, clash_bin_path, workers)
+        self.proxy_objs = ProxyExternalIPLookupAndFilter()(
+            self.proxy_dicts, clash_bin_path, workers
+        )
         end = time.time()
         logging.info(
             'time cost of updating external-ip and fitering: {}'.format(
@@ -486,27 +522,28 @@ class ProxyObjects:
             + make_separate_line('END geo check')
         )
 
-        map_region_PO_s = {}
+        map_region_proxyobjects = {}
         for po in self.proxy_objs:
-            if po.region not in map_region_PO_s.keys():
-                map_region_PO_s[po.region] = [po]
+            if po.region not in map_region_proxyobjects.keys():
+                map_region_proxyobjects[po.region] = [po]
             else:
-                map_region_PO_s[po.region].append(po)
-        self.map_region_PO_s = map_region_PO_s
+                map_region_proxyobjects[po.region].append(po)
+        self.map_region_proxyobjects = map_region_proxyobjects
 
     def rename(
         self,
-        format_v6='[IPV6] {region} - {number:02d}',
-        format_v4='{region} - {number:02d}',
+        format_v6=default_format_v6,
+        format_v4=default_format_v4,
     ):
-        self.map_region_renamedPO_s = {}
-        for region, POs in self.map_region_PO_s.items():
+        self.map_region_renamedproxyobjects = {}
+        for region, POs in self.map_region_proxyobjects.items():
             POs = sorted(POs)
-            self.map_region_renamedPO_s[region] = []
+            self.map_region_renamedproxyobjects[region] = []
             for i, po in enumerate(POs):
                 format_ = format_v6 if po.is_ipv6() else format_v4
                 po.rename(format_.format(region=region, number=i + 1))
-                self.map_region_renamedPO_s[region].append(po)
+                self.map_region_renamedproxyobjects[region].append(po)
+        return self.map_region_renamedproxyobjects
 
 
 class Config:
@@ -543,22 +580,22 @@ class Config:
         else:
             proxy_group['proxies'] = proxy_names
 
-    def update(self, proxy_objects: ProxyObjects, enable_rename):
+    def update(self, proxiesobject: ProxiesClass, enable_rename):
         """Update proxies and proxy-groups."""
         if not self.has_region_key():
-            self.config['proxies'] = proxy_objects.proxy_dicts
+            self.config['proxies'] = proxiesobject.proxy_dicts
             for pg in self.config['proxy-groups']:
-                self.__add_proxy_names(pg, proxy_objects.proxy_names)
+                self.__add_proxy_names(pg, proxiesobject.proxy_names)
             return
         elif not enable_rename:
-            map_region_PO_s = proxy_objects.map_region_PO_s
+            map_region_PO_s = proxiesobject.map_region_proxyobjects
         else:
-            map_region_PO_s = proxy_objects.map_region_renamedPO_s
+            map_region_PO_s = proxiesobject.map_region_renamedproxyobjects
 
         # update proxies
         self.config['proxies'] = []
         for _, po_s in map_region_PO_s.items():
-            self.config['proxies'] += ProxyObjects(po_s).proxy_dicts
+            self.config['proxies'] += ProxiesClass(po_s).proxy_dicts
 
         # update update-groups
         for pg in self.config['proxy-groups']:
@@ -567,7 +604,7 @@ class Config:
                 for region in pg['region']:
                     try:
                         self.__add_proxy_names(
-                            pg, ProxyObjects(map_region_PO_s[region]).proxy_names
+                            pg, ProxiesClass(map_region_PO_s[region]).proxy_names
                         )
                         has_region_added = True
                     except KeyError:
@@ -578,10 +615,10 @@ class Config:
                             pg['name']
                         )
                     )
-                    self.__add_proxy_names(pg, proxy_objects.proxy_names)
+                    self.__add_proxy_names(pg, proxiesobject.proxy_names)
                 pg.pop('region')
             else:
-                self.__add_proxy_names(pg, proxy_objects.proxy_names)
+                self.__add_proxy_names(pg, proxiesobject.proxy_names)
 
     def validate(self, clash_bin_path):
         log_fd = tempfile.SpooledTemporaryFile()
@@ -634,29 +671,47 @@ class Config:
         return ret
 
 
-def main():
-    # check args
-    config_template = load_config(args.template, args.proxy)
-    config_obj_template = Config(config_template)
-    if not args.mmdb and config_obj_template.has_region_key():
+def is_configs_has_region_key(configs: Iterable[Config]):
+    for config in configs:
+        if config.has_region_key():
+            return True
+    else:
+        return False
+
+
+def check_arg_mmdb(template_configs):
+    if not args.mmdb and is_configs_has_region_key(template_configs):
         logging.critical('Please provide mmdb database.')
         exit(1)
 
-    config_origin = load_config(args.config, args.proxy)
-    proxy_objs = ProxyObjects(config_origin['proxies'])
-    proxy_objs.update_external_ip(args.bin, args.workers)
+
+def get_proxiesobject():
+    upstream_config = load_config(args.config, args.proxy)
+    proxiesobject = ProxiesClass(upstream_config['proxies'])
+    proxiesobject.external_ip_lookup_and_filter(args.bin, args.workers)
     if args.mmdb:
-        proxy_objs.update_geometry(args.mmdb)
-        if not args.disable_rename:
-            proxy_objs.rename(format_v4=args.format_v4, format_v6=args.format_v6)
+        proxiesobject.update_geometry(args.mmdb)
+        proxiesobject.rename(format_v4=args.format_v4, format_v6=args.format_v6)
+    return proxiesobject
 
-    config_obj_template.update(proxy_objs, not args.disable_rename)
 
-    if config_obj_template.validate(args.bin):
-        dump_config(config_obj_template.config, args.out)
+def main():
+    template_configs = [Config(load_config(t, args.proxy)) for t in args.templates]
+    # check arg mmdb
+    check_arg_mmdb(template_configs)
 
-    if args.out_ss:
-        dump_config_json(config_obj_template.config_ss_android, args.out_ss)
+    proxiesobject = get_proxiesobject()
+
+    [
+        t.update(proxiesobject, enable_rename)
+        for t, enable_rename in zip(template_configs, args.enable_rename)
+    ]
+
+    for template_config, out, out_ss in zip(template_configs, args.out, args.out_ss):
+        if template_config.validate(args.bin):
+            dump_config(template_config.config, out)
+            if out_ss:
+                dump_config_json(template_config.config_ss_android, out_ss)
 
 
 if __name__ == '__main__':

@@ -16,14 +16,14 @@ proxy-groups:
   interval: 300
   url: youtube.com
   region:
-  - 日本
+  - JP
 
 - name: BILIBILI
   type: select 
   region:
-  - 香港
-  - 台湾
-  - 澳门
+  - HK 
+  - TW 
+  - MO 
   proxies:
   - DIRECT
  
