@@ -20,8 +20,8 @@ import requests
 import yaml
 from requests.exceptions import ProxyError, SSLError, Timeout
 
-default_format_v4 = '{region} - {number:02d}'
-default_format_v6 = '[IPv6] {region} - {number:02d}'
+default_format_v4 = '{region}-{number:02d}'
+default_format_v6 = '[IPv6] {region}-{number:02d}'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('bin', help='clash bin path')
@@ -31,27 +31,14 @@ parser.add_argument('--workers', help='for multiprocessing', default=0, type=int
 parser.add_argument(
     '--proxy', help='existing proxy used to download files', default=None
 )
-parser.add_argument('-o', '--out', help='output config file pathes', nargs='+')
-parser.add_argument(
-    '--out-ss',
-    help='output ss config pathes, same sequence as argument `template`, place \
-        the templates to the end of its sequence so that this argument\' length \
-            may differ from `template` if you want to disable outputing ss configs.',
-    nargs='*',
-    default=[],
-)
+parser.add_argument('-o', '--out', help='output config file paths', nargs='+')
+parser.add_argument('--out-ss', help='output ss config path', default=None)
 parser.add_argument(
     '--mmdb',
     help='mmdb database path, not perform geolookup by default.',
     default=None,
 )
-parser.add_argument(
-    '--enable-rename',
-    help='Rename proxy names, see also argument `out-ss`',
-    nargs='*',
-    type=int,
-    default=[],
-)
+parser.add_argument('--enable-rename', help='Rename proxy names', action='store_true')
 parser.add_argument(
     '--format-v4',
     help=f'format string to rename proxy (IPv4)',
@@ -73,14 +60,7 @@ args = parser.parse_args()
 
 
 def prepare_args():
-    length = len(args.templates)
-    assert len(args.out) == length
-    for arg, default in zip(
-        [args.out_ss, args.enable_rename],
-        [False, False],
-    ):
-        assert len(arg) <= length
-        arg.extend([default] * (length - len(arg)))
+    assert len(args.out) == len(args.templates)
 
 
 prepare_args()
@@ -91,7 +71,7 @@ logging.basicConfig(
     level=getattr(logging, args.log_level),
     format='[%(asctime)s] [%(levelname)s] %(message)s',
     datefmt='%m-%d %H:%M:%S',
-    encoding='utf-8',
+    # encoding='utf-8',
 )
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -120,7 +100,7 @@ def load_config_from_url(url, proxy=None):
     headers = {'charset': 'utf-8'}
     if proxy is not None:
         proxy = {'https': proxy}
-    r = requests.get(url=url, headers=headers, proxies=proxy)
+    r = requests.get(url=url, headers=headers, proxies=proxy, timeout=10)
     conf = yaml.safe_load(r.text)
     return conf
 
@@ -202,8 +182,8 @@ mode: global
         )
         time.sleep(3)
 
-        self.local_proxy_addr = 'http://localhost:{}'.format(proxy_port)
-        self.control_addr = 'http://localhost:{}'.format(control_port)
+        self.local_proxy_addr = 'http://127.0.0.1:{}'.format(proxy_port)
+        self.control_addr = 'http://127.0.0.1:{}'.format(control_port)
 
     @staticmethod
     def __make_temp_subconf(control_port, proxy_port, proxies):
@@ -465,7 +445,7 @@ class ProxyExternalIPLookupAndFilter:
 
 class ProxiesClass:
     def __init__(self, init_arg: Union[Iterable[dict], Iterable[ProxyClass]]):
-        self.proxy_objs = self.parse_proxies(init_arg)
+        self.proxy_objects = self.parse_proxies(init_arg)
         self.map_region_proxyobjects = None
         self.map_region_renamedproxyobjects = None
 
@@ -484,20 +464,20 @@ class ProxiesClass:
 
     @property
     def proxy_dicts(self):
-        return [po.proxy_dict for po in self.proxy_objs]
+        return [proxy_object.proxy_dict for proxy_object in self.proxy_objects]
 
     @property
     def proxy_names(self):
-        return sorted([po.name for po in self.proxy_objs])
+        return sorted([po.name for po in self.proxy_objects])
 
     def external_ip_lookup_and_filter(self, clash_bin_path, workers):
         start = time.time()
-        self.proxy_objs = ProxyExternalIPLookupAndFilter()(
+        self.proxy_objects = ProxyExternalIPLookupAndFilter()(
             self.proxy_dicts, clash_bin_path, workers
         )
         end = time.time()
         logging.info(
-            'time cost of updating external-ip and fitering: {}'.format(
+            'time cost of updating external-ip and filtering: {}'.format(
                 time.strftime('%M min %S s', time.gmtime(end - start))
             )
         )
@@ -505,7 +485,7 @@ class ProxiesClass:
     def update_geometry(self, mmdb_path):
         gl = GeoLookup(mmdb_path)
 
-        for p in self.proxy_objs:
+        for p in self.proxy_objects:
             p.geo = gl(p.ext_ip)
 
         logging.debug(
@@ -515,7 +495,7 @@ class ProxiesClass:
             + '\n'.join(
                 [
                     '[{}] {}'.format(p.geo.country.names['zh-CN'], p.proxy_dict['name'])
-                    for p in self.proxy_objs
+                    for p in self.proxy_objects
                 ]
             )
             + '\n'
@@ -523,7 +503,7 @@ class ProxiesClass:
         )
 
         map_region_proxyobjects = {}
-        for po in self.proxy_objs:
+        for po in self.proxy_objects:
             if po.region not in map_region_proxyobjects.keys():
                 map_region_proxyobjects[po.region] = [po]
             else:
@@ -547,7 +527,7 @@ class ProxiesClass:
 
 
 class Config:
-    def __init__(self, config) -> None:
+    def __init__(self, config: dict) -> None:
         self.config = config
 
     @property
@@ -576,35 +556,47 @@ class Config:
     @staticmethod
     def __add_proxy_names(proxy_group, proxy_names):
         if 'proxies' in proxy_group.keys():
-            proxy_group['proxies'] = proxy_names + proxy_group['proxies']
+            proxy_group['proxies'] += proxy_names
         else:
             proxy_group['proxies'] = proxy_names
 
     def update(self, proxiesobject: ProxiesClass, enable_rename):
         """Update proxies and proxy-groups."""
-        if not self.has_region_key():
+
+        proxiesobject_in_template = None
+        if 'proxies' in self.config.keys():
+            proxiesobject_in_template = ProxiesClass(self.config['proxies'])
+            self.config['proxies'] += proxiesobject.proxy_dicts
+        else:
             self.config['proxies'] = proxiesobject.proxy_dicts
-            for pg in self.config['proxy-groups']:
-                self.__add_proxy_names(pg, proxiesobject.proxy_names)
+
+        if not self.has_region_key():
+            # 因为没有region, 所以可以直接给每个group全部的proxy names
+            for proxy_group in self.config['proxy-groups']:
+                self.__add_proxy_names(proxy_group, proxiesobject.proxy_names)
+                if proxiesobject_in_template:
+                    self.__add_proxy_names(
+                        proxy_group, proxiesobject_in_template.proxy_names
+                    )
             return
         elif not enable_rename:
-            map_region_PO_s = proxiesobject.map_region_proxyobjects
+            map_region_proxyobjects = proxiesobject.map_region_proxyobjects
         else:
-            map_region_PO_s = proxiesobject.map_region_renamedproxyobjects
-
-        # update proxies
-        self.config['proxies'] = []
-        for _, po_s in map_region_PO_s.items():
-            self.config['proxies'] += ProxiesClass(po_s).proxy_dicts
+            map_region_proxyobjects = proxiesobject.map_region_renamedproxyobjects
 
         # update update-groups
-        for pg in self.config['proxy-groups']:
-            if 'region' in pg.keys():
+        for proxy_group in self.config['proxy-groups']:
+            if proxiesobject_in_template:
+                self.__add_proxy_names(
+                    proxy_group, proxiesobject_in_template.proxy_names
+                )
+            if 'region' in proxy_group.keys():
                 has_region_added = False
-                for region in pg['region']:
+                for region in proxy_group['region']:
                     try:
                         self.__add_proxy_names(
-                            pg, ProxiesClass(map_region_PO_s[region]).proxy_names
+                            proxy_group,
+                            ProxiesClass(map_region_proxyobjects[region]).proxy_names,
                         )
                         has_region_added = True
                     except KeyError:
@@ -612,13 +604,13 @@ class Config:
                 if not has_region_added:
                     logging.warning(
                         'No valid regions for proxy-group {}, adding all the proxies to this group.'.format(
-                            pg['name']
+                            proxy_group['name']
                         )
                     )
-                    self.__add_proxy_names(pg, proxiesobject.proxy_names)
-                pg.pop('region')
+                    self.__add_proxy_names(proxy_group, proxiesobject.proxy_names)
+                proxy_group.pop('region')
             else:
-                self.__add_proxy_names(pg, proxiesobject.proxy_names)
+                self.__add_proxy_names(proxy_group, proxiesobject.proxy_names)
 
     def validate(self, clash_bin_path):
         log_fd = tempfile.SpooledTemporaryFile()
@@ -702,16 +694,14 @@ def main():
 
     proxiesobject = get_proxiesobject()
 
-    [
-        t.update(proxiesobject, enable_rename)
-        for t, enable_rename in zip(template_configs, args.enable_rename)
-    ]
+    [t.update(proxiesobject, args.enable_rename) for t in template_configs]
 
-    for template_config, out, out_ss in zip(template_configs, args.out, args.out_ss):
+    for template_config, out in zip(template_configs, args.out):
         if template_config.validate(args.bin):
             dump_config(template_config.config, out)
-            if out_ss:
-                dump_config_json(template_config.config_ss_android, out_ss)
+
+    if args.out_ss:
+        dump_config_json(template_configs[0].config_ss_android, args.out_ss)
 
 
 if __name__ == '__main__':

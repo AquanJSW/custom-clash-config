@@ -4,3 +4,4 @@
 !requirement.txt
 !config/sample-template.yml
 !.gitignore
+!scripts/download.py

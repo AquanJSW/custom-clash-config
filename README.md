@@ -9,4 +9,6 @@
    1. 配置文件中指引每个 group 的 proxy 地域偏好
 
 3. Proxy 重命名，例如
-    <div style="text-align: center">[IPV6] 日本 - 01</div>
+    <div style="text-align: center">JP-01</div>
+
+4. mix in 自建代理
